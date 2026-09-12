@@ -1,13 +1,15 @@
 import os
 import subprocess
+import uuid
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, send_file
 
 app = Flask(__name__)
 
-# Where MP3s land on your machine
 OUTPUT_DIR = Path.home() / "Music" / "yt-mp3"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+JOBS = {}
 
 PAGE = """
 <!doctype html>
@@ -25,8 +27,8 @@ PAGE = """
     button:disabled { background: #94a3b8; cursor: wait; }
     #log { margin-top: 20px; white-space: pre-wrap;
            font-family: monospace; font-size: 13px;
-           background: #f1f5f9; padding: 12px; border-radius: 6px;
-           min-height: 60px; }
+           background: #f1f5f9; color: #0f172a; padding: 12px;
+           border-radius: 6px; min-height: 60px; }
   </style>
 </head>
 <body>
@@ -81,8 +83,6 @@ def convert():
     if not url.startswith(("http://", "https://")):
         return jsonify(ok=False, message="Please paste a full URL."), 400
 
-    # Important: pass args as a list (no shell=True) — prevents
-    # command injection from the URL string.
     cmd = [
         "yt-dlp",
         "-x",
@@ -90,35 +90,43 @@ def convert():
         "--audio-quality", "0",
         "--no-playlist",
         "-o", str(OUTPUT_DIR / "%(title)s.%(ext)s"),
-        "--print", "after_move:filepath",   # prints final path on stdout
+        "--print", "after_move:filepath",
         url,
     ]
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
-        return jsonify(ok=False, message="Timed out after 10 minutes."), 500
+        return jsonify(ok=False, message="Timed out."), 500
 
     if result.returncode != 0:
-        return jsonify(
-            ok=False,
-            message="yt-dlp failed:\n" + (result.stderr or "")[-2000:],
-        ), 500
+        return jsonify(ok=False, message="yt-dlp failed:\n" + result.stderr[-2000:]), 500
 
-    final_path = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "?"
+    final_path = result.stdout.strip().splitlines()[-1]
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"path": final_path, "title": Path(final_path).name}
+
     return jsonify(
         ok=True,
-        message=f"Saved to:\n{final_path}\n\nTotal files in {OUTPUT_DIR}: "
-                f"{len(list(OUTPUT_DIR.glob('*.mp3')))}",
+        job_id=job_id,
+        title=Path(final_path).name,
+        message=f"Saved to: {final_path}",
+    )
+
+@app.get("/download/<job_id>")
+def download(job_id):
+    job = JOBS.get(job_id)
+    if not job or not Path(job["path"]).exists():
+        return jsonify(ok=False, message="Job not found"), 404
+
+    return send_file(
+        job["path"],
+        mimetype="audio/mpeg",
+        as_attachment=True,
+        download_name=job["title"],
     )
 
 if __name__ == "__main__":
     print(f"MP3s will be saved to: {OUTPUT_DIR}")
-    print("Open http://127.0.0.1:5000 in your browser. Ctrl+C to stop.")
-    # Bind to localhost only — not reachable from your network.
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    print("Open http://192.168.8.137:5000 in your browser. Ctrl+C to stop.")
+    app.run(host="0.0.0.0", port=5000, debug=False)
