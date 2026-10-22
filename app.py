@@ -3,8 +3,12 @@ import subprocess
 import uuid
 from pathlib import Path
 from flask import Flask, request, jsonify, render_template_string, send_file
+from yyds_mdns import MDNS
+from ytmusic_routes import ytmusic_bp
 
 app = Flask(__name__)
+app.register_blueprint(ytmusic_bp)
+MDNS(app, name="flask-app", port=5000)
 
 OUTPUT_DIR = Path.home() / "Music" / "yt-mp3"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -128,5 +132,5 @@ def download(job_id):
 
 if __name__ == "__main__":
     print(f"MP3s will be saved to: {OUTPUT_DIR}")
-    print("Open http://192.168.8.137:5000 in your browser. Ctrl+C to stop.")
+    print("Open http://flask-app.local:5000 in your browser. Ctrl+C to stop.")
     app.run(host="0.0.0.0", port=5000, debug=False)
