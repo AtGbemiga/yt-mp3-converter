@@ -7,6 +7,7 @@ from yyds_mdns import MDNS
 from ytmusic_routes import ytmusic_bp
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "orin-dev-secret-change-in-prod")
 app.register_blueprint(ytmusic_bp)
 MDNS(app, name="flask-app", port=5000)
 
