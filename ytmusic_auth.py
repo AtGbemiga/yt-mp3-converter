@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 from typing import Any
+from urllib.parse import urlparse
 
 from flask import request, session
 from ytmusicapi import YTMusic
@@ -52,13 +54,38 @@ def ytmusic_from_request() -> YTMusic:
     return YTMusic(auth)
 
 
+_CORS_ALLOW_HEADERS = (
+    "Content-Type, X-YTMusic-Auth, Authorization, ngrok-skip-browser-warning"
+)
+_CORS_ALLOW_METHODS = "GET, POST, DELETE, OPTIONS"
+
+
+def _origin_allowed(origin: str) -> bool:
+    extra = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    for item in extra.split(","):
+        item = item.strip()
+        if item and origin == item:
+            return True
+
+    parsed = urlparse(origin)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in ("localhost", "127.0.0.1"):
+        return True
+    if host.endswith(".vercel.app"):
+        return True
+    return False
+
+
 def apply_cors(response):
     origin = request.headers.get("Origin")
-    if origin:
+    if origin and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Headers"] = (
-            "Content-Type, X-YTMusic-Auth, Authorization"
-        )
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = _CORS_ALLOW_HEADERS
+        response.headers["Access-Control-Allow-Methods"] = _CORS_ALLOW_METHODS
+        response.headers["Vary"] = "Origin"
+        if request.method == "OPTIONS":
+            response.headers["Access-Control-Max-Age"] = "86400"
     return response
