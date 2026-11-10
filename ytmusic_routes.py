@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import uuid
+
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from ytmusic_auth import (
@@ -11,7 +14,18 @@ from ytmusic_auth import (
     store_auth_in_session,
     ytmusic_from_request,
 )
-from ytmusic_service import playlist_tracks, search_songs, stream_audio_process
+from ytmusic_service import (
+    playlist_tracks,
+    search_songs,
+    sniff_audio_mime,
+    stream_audio_process,
+)
+
+from ytmusic_download import (
+    JOBS,
+    download_track_to_seaweed,
+    run_playlist_download,
+)
 
 ytmusic_bp = Blueprint("ytmusic", __name__, url_prefix="/ytmusic")
 
@@ -21,6 +35,9 @@ def _cors_after(response):
     return apply_cors(response)
 
 
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 @ytmusic_bp.route("/auth", methods=["POST", "DELETE", "OPTIONS"])
 def ytmusic_auth():
     if request.method == "OPTIONS":
@@ -49,6 +66,9 @@ def ytmusic_auth():
     return jsonify(ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
 @ytmusic_bp.route("/search", methods=["GET", "OPTIONS"])
 def ytmusic_search():
     if request.method == "OPTIONS":
@@ -68,12 +88,15 @@ def ytmusic_search():
         results = search_songs(yt, q, limit=limit)
     except ValueError as exc:
         return jsonify(ok=False, message=str(exc)), 400
-    except Exception as exc:  # noqa: BLE001 — surface API errors to client
+    except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, message=str(exc)), 500
 
     return jsonify(ok=True, results=results)
 
 
+# ---------------------------------------------------------------------------
+# Playlist
+# ---------------------------------------------------------------------------
 @ytmusic_bp.route("/playlist", methods=["GET", "OPTIONS"])
 def ytmusic_playlist():
     if request.method == "OPTIONS":
@@ -102,6 +125,9 @@ def ytmusic_playlist():
     return jsonify(ok=True, title=title, results=results)
 
 
+# ---------------------------------------------------------------------------
+# Audio streaming (proxy yt-dlp through the Flask app)
+# ---------------------------------------------------------------------------
 @ytmusic_bp.route("/play/<video_id>", methods=["GET", "OPTIONS"])
 def ytmusic_play(video_id: str):
     if request.method == "OPTIONS":
@@ -113,11 +139,30 @@ def ytmusic_play(video_id: str):
     except ValueError as exc:
         return jsonify(ok=False, message=str(exc)), 400
     except FileNotFoundError:
-        return jsonify(ok=False, message="yt-dlp is not installed on the server."), 500
+        return jsonify(
+            ok=False, message="yt-dlp is not installed on the server."
+        ), 500
+
+    assert process.stdout is not None
+    first_chunk = process.stdout.read(64 * 1024)
+    if not first_chunk:
+        err = b""
+        if process.stderr is not None:
+            err = process.stderr.read() or b""
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        message = err.decode("utf-8", errors="replace")[-800:].strip()
+        return jsonify(
+            ok=False,
+            message=message or "Empty audio stream from yt-dlp",
+        ), 502
+
+    mime = sniff_audio_mime(first_chunk)
 
     def generate():
         try:
-            assert process.stdout is not None
+            yield first_chunk
             while True:
                 chunk = process.stdout.read(64 * 1024)
                 if not chunk:
@@ -130,6 +175,76 @@ def ytmusic_play(video_id: str):
 
     return Response(
         stream_with_context(generate()),
-        mimetype="application/octet-stream",
-        headers={"Cache-Control": "no-store"},
+        mimetype=mime,
+        headers={
+            "Cache-Control": "no-store",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+        },
     )
+
+
+# ---------------------------------------------------------------------------
+# Downloads → SeaweedFS
+# ---------------------------------------------------------------------------
+@ytmusic_bp.post("/download/track")
+def download_track():
+    data = request.get_json(silent=True) or {}
+    video_id = (data.get("videoId") or "").strip()
+    title = (data.get("title") or "").strip()
+    if not video_id:
+        return jsonify(ok=False, message="videoId is required"), 400
+
+    try:
+        auth_headers = auth_dict_from_request()
+        result = download_track_to_seaweed(video_id, title, auth_headers)
+    except ValueError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, message=str(e)), 500
+
+    return jsonify(ok=True, **result)
+
+
+@ytmusic_bp.post("/download/playlist")
+def download_playlist():
+    data = request.get_json(silent=True) or {}
+    tracks = data.get("tracks")
+    if not isinstance(tracks, list) or not tracks:
+        return jsonify(ok=False, message="tracks[] is required"), 400
+
+    cleaned = [
+        {"videoId": t["videoId"], "title": t.get("title", "")}
+        for t in tracks
+        if isinstance(t, dict) and t.get("videoId")
+    ]
+    if not cleaned:
+        return jsonify(ok=False, message="No valid tracks"), 400
+
+    try:
+        auth_headers = auth_dict_from_request()
+    except ValueError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {
+        "status": "queued",
+        "total": len(cleaned),
+        "completed": 0,
+        "failed": 0,
+        "items": [],
+    }
+    threading.Thread(
+        target=run_playlist_download,
+        args=(job_id, cleaned, auth_headers),
+        daemon=True,
+    ).start()
+
+    return jsonify(ok=True, jobId=job_id, total=len(cleaned))
+
+
+@ytmusic_bp.get("/download/playlist/<job_id>")
+def download_playlist_status(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify(ok=False, message="Job not found"), 404
+    return jsonify(ok=True, jobId=job_id, **job)

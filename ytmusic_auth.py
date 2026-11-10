@@ -75,6 +75,8 @@ def _origin_allowed(origin: str) -> bool:
         return True
     if host.endswith(".vercel.app"):
         return True
+    if host.endswith(".netlify.app"):
+        return True
     return False
 
 

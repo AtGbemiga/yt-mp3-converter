@@ -16,3 +16,5 @@ venv/
 env/
 ENV/
 .python-version
+data/
+test.txt

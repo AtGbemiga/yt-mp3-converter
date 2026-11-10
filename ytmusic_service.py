@@ -108,6 +108,23 @@ def playlist_tracks(
     return title, tracks
 
 
+def sniff_audio_mime(head: bytes) -> str:
+    """Guess a browser-safe audio Content-Type from the first bytes."""
+    if not head:
+        return "audio/webm"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "audio/webm"
+    if len(head) >= 8 and head[4:8] == b"ftyp":
+        return "audio/mp4"
+    if head.startswith(b"OggS"):
+        return "audio/ogg"
+    if head.startswith(b"ID3") or (
+        len(head) > 1 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+    ):
+        return "audio/mpeg"
+    return "audio/webm"
+
+
 def stream_audio_process(
     video_id: str, auth_headers: dict[str, Any] | None = None
 ) -> subprocess.Popen[bytes]:
@@ -117,10 +134,11 @@ def stream_audio_process(
         raise ValueError("Invalid video id")
 
     watch_url = f"https://music.youtube.com/watch?v={video_id}"
+    # Prefer container types HTML audio can decode; avoid generic octet-stream.
     cmd: list[str] = [
         "yt-dlp",
         "-f",
-        "bestaudio/best",
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
         "--no-playlist",
         "-o",
         "-",
