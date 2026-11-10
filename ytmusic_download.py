@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
+import re
 
 # ---- SeaweedFS config (env-overridable) ----
 SEAWEED_MODE = os.environ.get("SEAWEED_MODE", "filer")  # "filer" or "s3"
@@ -26,6 +27,89 @@ SEAWEED_PUBLIC_BASE = os.environ.get(
 )
 
 JOBS: dict[str, dict[str, Any]] = {}  # shared with routes
+
+
+
+_VIDEO_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]\.mp3$")
+
+
+def list_downloaded_tracks() -> list[dict[str, str]]:
+    """Return [{videoId, filename, url}] for every mp3 under SEAWEED_PREFIX."""
+    if SEAWEED_MODE == "s3":
+        return _list_downloaded_s3()
+    return _list_downloaded_filer()
+
+
+def _list_downloaded_filer() -> list[dict[str, str]]:
+    """Walk the Filer tree under SEAWEED_PREFIX, one page at a time."""
+    results: list[dict[str, str]] = []
+    last_file_name: str | None = None
+    base = f"{SEAWEED_FILER_URL.rstrip('/')}/{SEAWEED_PREFIX}/"
+
+    while True:
+        params: dict[str, Any] = {"pretty": "y", "limit": 1000}
+        if last_file_name:
+            params["lastFileName"] = last_file_name
+
+        resp = requests.get(base, params=params, timeout=30, headers={"Accept": "application/json"}, )
+        if resp.status_code == 404:
+            return results  # directory doesn't exist yet — nothing downloaded
+        resp.raise_for_status()
+
+        data = resp.json()
+        entries = data.get("Entries") or []
+        if not entries:
+            break
+
+        for e in entries:
+            name = (e.get("FullPath") or "").rsplit("/", 1)[-1]
+            m = _VIDEO_ID_RE.search(name)
+            if not m:
+                continue
+            video_id = m.group(1)
+            safe_name = quote(name)
+            results.append({
+                "videoId": video_id,
+                "filename": name,
+                "url": f"{SEAWEED_PUBLIC_BASE.rstrip('/')}/{SEAWEED_PREFIX}/{safe_name}",
+            })
+
+        last_file_name = entries[-1].get("FullPath")
+        if not last_file_name:
+            break
+        # If this page was short, we've reached the end.
+        if len(entries) < params["limit"]:
+            break
+
+    return results
+
+
+def _list_downloaded_s3() -> list[dict[str, str]]:
+    import boto3  # type: ignore
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=SEAWEED_S3_ENDPOINT,
+        aws_access_key_id=SEAWEED_S3_KEY or None,
+        aws_secret_access_key=SEAWEED_S3_SECRET or None,
+        region_name="us-east-1",
+    )
+    results: list[dict[str, str]] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    prefix = f"{SEAWEED_PREFIX}/"
+    for page in paginator.paginate(Bucket=SEAWEED_S3_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            name = key.rsplit("/", 1)[-1]
+            m = _VIDEO_ID_RE.search(name)
+            if not m:
+                continue
+            results.append({
+                "videoId": m.group(1),
+                "filename": name,
+                "url": f"{SEAWEED_S3_ENDPOINT.rstrip('/')}/{SEAWEED_S3_BUCKET}/{quote(key)}",
+            })
+    return results
 
 
 def _safe_filename(title: str, video_id: str) -> str:

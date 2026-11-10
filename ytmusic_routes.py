@@ -27,6 +27,8 @@ from ytmusic_download import (
     run_playlist_download,
 )
 
+from ytmusic_download import JOBS, download_track_to_seaweed, run_playlist_download, list_downloaded_tracks
+
 ytmusic_bp = Blueprint("ytmusic", __name__, url_prefix="/ytmusic")
 
 
@@ -248,3 +250,12 @@ def download_playlist_status(job_id):
     if not job:
         return jsonify(ok=False, message="Job not found"), 404
     return jsonify(ok=True, jobId=job_id, **job)
+
+
+@ytmusic_bp.get("/downloaded")
+def ytmusic_downloaded():
+    try:
+        items = list_downloaded_tracks()
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, message=str(e)), 500
+    return jsonify(ok=True, results=items)
