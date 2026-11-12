@@ -89,18 +89,16 @@ def ytmusic_downloads_library():
         return jsonify(ok=False, message=str(e)), 500
     return jsonify(ok=True, results=items)
 
+
 @ytmusic_bp.get("/downloads/play")
 def ytmusic_download_play_proxy():
-    url = request.args.get("url")
-    if not url:
+    seaweed_url = request.args.get("url")
+    if not seaweed_url:
         return jsonify(ok=False, message="url parameter is required"), 400
 
-    # Security check: ensure it's actually a SeaweedFS URL
-    if not url.startswith("http://192.168.8.95:8888") and not url.startswith("http://localhost:8888"):
-        return jsonify(ok=False, message="Invalid URL domain"), 403
-
-    # Proxy the request to SeaweedFS
-    req = requests.get(url, stream=True)
+    # Flask reaches out to SeaweedFS internally
+    req = requests.get(seaweed_url, stream=True)
+    
     if req.status_code != 200:
         return jsonify(ok=False, message="File not found on SeaweedFS"), 404
 
@@ -108,8 +106,7 @@ def ytmusic_download_play_proxy():
         stream_with_context(req.iter_content(chunk_size=64 * 1024)),
         content_type=req.headers.get('Content-Type', 'audio/mpeg'),
         headers={
-            "Accept-Ranges": "bytes", # Important for seeking
-            "Content-Length": req.headers.get('Content-Length', ''),
+            "Accept-Ranges": "bytes",
         }
     )
 

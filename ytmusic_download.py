@@ -319,7 +319,7 @@ def list_downloads_with_meta() -> list[dict[str, Any]]:
             "duration": meta.get("duration") or "",
             "thumbnail": meta.get("thumbnail") or "",
             "filename": item["filename"],
-            "url": f"http://localhost:5000/ytmusic/downloads/play?url={quote(item['url'])}",
+            "url": f"https://api.orin.name.ng/ytmusic/downloads/play?url={quote(item['url'])}",
             "savedAt": meta.get("savedAt") or 0,
         })
 
