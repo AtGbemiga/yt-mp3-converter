@@ -14,6 +14,10 @@ from urllib.parse import quote
 import requests
 import re
 
+import json
+import re
+from urllib.parse import quote
+
 # ---- SeaweedFS config (env-overridable) ----
 SEAWEED_MODE = os.environ.get("SEAWEED_MODE", "filer")  # "filer" or "s3"
 SEAWEED_FILER_URL = os.environ.get("SEAWEED_FILER_URL", "http://localhost:8888")
@@ -29,8 +33,42 @@ SEAWEED_PUBLIC_BASE = os.environ.get(
 JOBS: dict[str, dict[str, Any]] = {}  # shared with routes
 
 
-
 _VIDEO_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]\.mp3$")
+
+
+def _meta_filename(video_id: str) -> str:
+    return f"{video_id}.json"
+
+
+def _upload_meta_to_seaweed(video_id: str, meta: dict[str, Any]) -> None:
+    """Upload a small JSON sidecar with title/artist/duration/thumbnail."""
+    key = f"{SEAWEED_PREFIX}/{_meta_filename(video_id)}"
+    payload = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+
+    if SEAWEED_MODE == "s3":
+        import boto3  # type: ignore
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=SEAWEED_S3_ENDPOINT,
+            aws_access_key_id=SEAWEED_S3_KEY or None,
+            aws_secret_access_key=SEAWEED_S3_SECRET or None,
+            region_name="us-east-1",
+        )
+        s3.put_object(
+            Bucket=SEAWEED_S3_BUCKET,
+            Key=key,
+            Body=payload,
+            ContentType="application/json",
+        )
+        return
+
+    _ensure_filer_path(key)
+    requests.put(
+        f"{SEAWEED_FILER_URL.rstrip('/')}/{key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=30,
+    ).raise_for_status()
 
 
 def list_downloaded_tracks() -> list[dict[str, str]]:
@@ -197,8 +235,12 @@ def download_track_to_seaweed(
     video_id: str,
     title: str,
     auth_headers: dict[str, Any] | None = None,
+    *,
+    artist: str | None = None,
+    duration: str | None = None,
+    thumbnail: str | None = None,
 ) -> dict[str, Any]:
-    """yt-dlp → mp3 → SeaweedFS. Returns {url, filename}."""
+    """yt-dlp → mp3 → SeaweedFS (+ JSON sidecar). Returns {url, filename}."""
     video_id = (video_id or "").strip()
     if not video_id or not video_id.replace("-", "").replace("_", "").isalnum():
         raise ValueError("Invalid video id")
@@ -210,9 +252,7 @@ def download_track_to_seaweed(
         outtmpl = str(Path(tmpdir) / "%(id)s.%(ext)s")
         cmd: list[str] = [
             "yt-dlp",
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
+            "-x", "--audio-format", "mp3", "--audio-quality", "0",
             "--no-playlist",
             "-o", outtmpl,
             "--print", "after_move:filepath",
@@ -223,9 +263,7 @@ def download_track_to_seaweed(
                     cmd.extend(["--add-header", f"{k}:{v}"])
         cmd.append(watch_url)
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             raise RuntimeError(
                 f"yt-dlp failed for {video_id}: {result.stderr[-800:]}"
@@ -237,8 +275,61 @@ def download_track_to_seaweed(
 
         public_url = _upload_to_seaweed(local, filename)
 
+        # Sidecar so the downloads library screen can render without
+        # hitting ytmusicapi again on every page load.
+        _upload_meta_to_seaweed(video_id, {
+            "videoId": video_id,
+            "title": title,
+            "artist": artist,
+            "duration": duration,
+            "thumbnail": thumbnail,
+            "filename": filename,
+            "url": public_url,
+            "savedAt": int(__import__("time").time()),
+        })
+
     return {"videoId": video_id, "url": public_url, "filename": filename}
 
+def list_downloads_with_meta() -> list[dict[str, Any]]:
+    """Return the downloads library: [{videoId, title, artist, duration,
+    thumbnail, filename, url}] sorted newest-first."""
+    if SEAWEED_MODE == "s3":
+        raw = _list_downloaded_s3()
+        base = f"{SEAWEED_S3_ENDPOINT.rstrip('/')}/{SEAWEED_S3_BUCKET}"
+    else:
+        raw = _list_downloaded_filer()
+        base = SEAWEED_PUBLIC_BASE.rstrip("/")
+
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        video_id = item["videoId"]
+        meta_url = f"{base}/{SEAWEED_PREFIX}/{video_id}.json"
+        meta: dict[str, Any] = {}
+        try:
+            resp = requests.get(meta_url, timeout=10)
+            if resp.status_code == 200:
+                meta = resp.json()
+        except Exception:  # noqa: BLE001 — sidecar is optional
+            pass
+
+        result.append({
+            "videoId": video_id,
+            "title": meta.get("title") or _title_from_filename(item["filename"]),
+            "artist": meta.get("artist") or "",
+            "duration": meta.get("duration") or "",
+            "thumbnail": meta.get("thumbnail") or "",
+            "filename": item["filename"],
+            "url": f"http://localhost:5000/ytmusic/downloads/play?url={quote(item['url'])}",
+            "savedAt": meta.get("savedAt") or 0,
+        })
+
+    result.sort(key=lambda r: r["savedAt"], reverse=True)
+    return result
+
+
+def _title_from_filename(filename: str) -> str:
+    m = re.match(r"(.+?) \[[A-Za-z0-9_-]{11}\]\.mp3$", filename)
+    return m.group(1) if m else filename
 
 def run_playlist_download(
     job_id: str,
@@ -254,13 +345,18 @@ def run_playlist_download(
     job["failed"] = 0
     job["items"] = []
 
-    def _one(t: dict[str, Any]) -> dict[str, Any]:
+    def _one(t):
         try:
             r = download_track_to_seaweed(
-                t["videoId"], t.get("title", ""), auth_headers
+                t["videoId"],
+                t.get("title", ""),
+                auth_headers,
+                artist=t.get("artist"),
+                duration=t.get("duration"),
+                thumbnail=t.get("thumbnail"),
             )
             return {"ok": True, **r, "title": t.get("title", "")}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return {
                 "ok": False,
                 "videoId": t.get("videoId"),

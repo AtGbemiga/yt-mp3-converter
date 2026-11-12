@@ -29,6 +29,18 @@ from ytmusic_download import (
 
 from ytmusic_download import JOBS, download_track_to_seaweed, run_playlist_download, list_downloaded_tracks
 
+from ytmusic_download import (
+    JOBS,
+    download_track_to_seaweed,
+    run_playlist_download,
+    list_downloaded_tracks,
+    list_downloads_with_meta,
+)
+
+
+from flask import request, Response, stream_with_context
+import requests # make sure this is imported at the top of the file
+
 ytmusic_bp = Blueprint("ytmusic", __name__, url_prefix="/ytmusic")
 
 
@@ -67,6 +79,39 @@ def ytmusic_auth():
     store_auth_in_session(normalized)
     return jsonify(ok=True)
 
+
+
+@ytmusic_bp.get("/downloads")
+def ytmusic_downloads_library():
+    try:
+        items = list_downloads_with_meta()
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, message=str(e)), 500
+    return jsonify(ok=True, results=items)
+
+@ytmusic_bp.get("/downloads/play")
+def ytmusic_download_play_proxy():
+    url = request.args.get("url")
+    if not url:
+        return jsonify(ok=False, message="url parameter is required"), 400
+
+    # Security check: ensure it's actually a SeaweedFS URL
+    if not url.startswith("http://192.168.8.95:8888") and not url.startswith("http://localhost:8888"):
+        return jsonify(ok=False, message="Invalid URL domain"), 403
+
+    # Proxy the request to SeaweedFS
+    req = requests.get(url, stream=True)
+    if req.status_code != 200:
+        return jsonify(ok=False, message="File not found on SeaweedFS"), 404
+
+    return Response(
+        stream_with_context(req.iter_content(chunk_size=64 * 1024)),
+        content_type=req.headers.get('Content-Type', 'audio/mpeg'),
+        headers={
+            "Accept-Ranges": "bytes", # Important for seeking
+            "Content-Length": req.headers.get('Content-Length', ''),
+        }
+    )
 
 # ---------------------------------------------------------------------------
 # Search
@@ -198,14 +243,20 @@ def download_track():
 
     try:
         auth_headers = auth_dict_from_request()
-        result = download_track_to_seaweed(video_id, title, auth_headers)
+        result = download_track_to_seaweed(
+            video_id,
+            title,
+            auth_headers,
+            artist=(data.get("artist") or None),
+            duration=(data.get("duration") or None),
+            thumbnail=(data.get("thumbnail") or None),
+        )
     except ValueError as exc:
         return jsonify(ok=False, message=str(exc)), 400
     except Exception as e:  # noqa: BLE001
         return jsonify(ok=False, message=str(e)), 500
 
     return jsonify(ok=True, **result)
-
 
 @ytmusic_bp.post("/download/playlist")
 def download_playlist():
@@ -215,10 +266,16 @@ def download_playlist():
         return jsonify(ok=False, message="tracks[] is required"), 400
 
     cleaned = [
-        {"videoId": t["videoId"], "title": t.get("title", "")}
-        for t in tracks
-        if isinstance(t, dict) and t.get("videoId")
-    ]
+    {
+        "videoId": t["videoId"],
+        "title": t.get("title", ""),
+        "artist": t.get("artist"),
+        "duration": t.get("duration"),
+        "thumbnail": t.get("thumbnail"),
+    }
+    for t in tracks
+    if isinstance(t, dict) and t.get("videoId")
+]
     if not cleaned:
         return jsonify(ok=False, message="No valid tracks"), 400
 
