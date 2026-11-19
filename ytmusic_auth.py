@@ -15,23 +15,29 @@ from ytmusicapi import YTMusic
 AUTH_HEADER = "X-YTMusic-Auth"
 SESSION_KEY = "ytmusic_browser_auth"
 
-_default_yt = YTMusic()
+_default_yt: YTMusic | None = None
+
+def _get_default_yt() -> YTMusic:
+    global _default_yt
+    if _default_yt is None:
+        _default_yt = YTMusic()
+    return _default_yt
+
+def _decode_auth_header(raw: str) -> dict[str, Any]:
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+        payload = json.loads(decoded)
+    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Invalid {AUTH_HEADER} header") from exc
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError(f"{AUTH_HEADER} must be a JSON object of browser headers")
+    return payload
 
 
 def auth_dict_from_request() -> dict[str, Any] | None:
     raw = (request.headers.get(AUTH_HEADER) or "").strip()
     if raw:
-        try:
-            decoded = base64.b64decode(raw, validate=True)
-            payload = json.loads(decoded)
-        except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ValueError(f"Invalid {AUTH_HEADER} header") from exc
-        if not isinstance(payload, dict) or not payload:
-            raise ValueError(
-                f"{AUTH_HEADER} must be a JSON object of browser headers"
-            )
-        return payload
-
+        return _decode_auth_header(raw)
     stored = session.get(SESSION_KEY)
     if isinstance(stored, dict) and stored:
         return stored
@@ -50,7 +56,7 @@ def clear_auth_session() -> None:
 def ytmusic_from_request() -> YTMusic:
     auth = auth_dict_from_request()
     if auth is None:
-        return _default_yt
+        return _get_default_yt()
     return YTMusic(auth)
 
 

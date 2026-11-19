@@ -1,4 +1,4 @@
-"""YouTube Music search/playlists via ytmusicapi; audio delivery via yt-dlp."""
+"""yt Music search/playlists via ytmusicapi; audio delivery via yt-dlp."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ytmusicapi import YTMusic
+from typing import Callable
 
 
 def _pick_thumbnail(thumbs: Any) -> str | None:
@@ -125,16 +126,15 @@ def sniff_audio_mime(head: bytes) -> str:
     return "audio/webm"
 
 
-def stream_audio_process(
+def _build_ytdlp_command(
     video_id: str, auth_headers: dict[str, Any] | None = None
-) -> subprocess.Popen[bytes]:
-    """Spawn yt-dlp writing best audio to stdout for proxy streaming."""
+) -> list[str]:
+    """Build the yt-dlp argv for streaming audio to stdout."""
     video_id = (video_id or "").strip()
     if not video_id or not video_id.replace("-", "").replace("_", "").isalnum():
         raise ValueError("Invalid video id")
 
     watch_url = f"https://music.youtube.com/watch?v={video_id}"
-    # Prefer container types HTML audio can decode; avoid generic octet-stream.
     cmd: list[str] = [
         "yt-dlp",
         "-f",
@@ -143,7 +143,6 @@ def stream_audio_process(
         "-o",
         "-",
     ]
-
     if auth_headers:
         for key, value in auth_headers.items():
             if value is None:
@@ -152,9 +151,19 @@ def stream_audio_process(
             if not text:
                 continue
             cmd.extend(["--add-header", f"{key}:{text}"])
-
     cmd.append(watch_url)
-    return subprocess.Popen(
+    return cmd
+
+
+def stream_audio_process(
+    video_id: str,
+    auth_headers: dict[str, Any] | None = None,
+    *,
+    popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+) -> subprocess.Popen[bytes]:
+    """Spawn yt-dlp writing best audio to stdout for proxy streaming."""
+    cmd = _build_ytdlp_command(video_id, auth_headers)
+    return popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
