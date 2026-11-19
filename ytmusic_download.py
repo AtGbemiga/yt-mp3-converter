@@ -1,4 +1,4 @@
-"""Download YouTube audio to SeaweedFS (Filer HTTP API or S3)."""
+"""Download yt audio to SeaweedFS (Filer HTTP API or S3)."""
 
 from __future__ import annotations
 
